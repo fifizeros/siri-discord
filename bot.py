@@ -429,7 +429,9 @@ async def on_message(message: discord.Message):
                         if not dm_content:
                             return "Error: Missing content argument."
                         try:
-                            await message.author.send(dm_content)
+                            dm_msg = await message.author.send(dm_content)
+                            if db:
+                                asyncio.create_task(async_save_message(dm_msg))
                             return "Successfully sent private Direct Message to the user."
                         except Exception as e:
                             return f"Error sending DM (user may have DMs closed): {e}"
