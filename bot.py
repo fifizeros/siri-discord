@@ -38,6 +38,15 @@ intents.dm_messages = True
 
 client = discord.Client(intents=intents)
 
+# Active tasks tracking for steering/cancellation
+# Key: f"{channel_id}:{user_id}", Value: asyncio.Task
+active_tasks = {}
+
+# Caching for tool execution results to prevent redundant API calls
+# Key: f"{channel_id}:{user_id}", Value: dict (containing queries and results)
+tool_cache = {}
+
+
 async def async_save_message(message: discord.Message):
     """Saves message metadata to Supabase asynchronously in a background thread."""
     if not db:
@@ -135,6 +144,33 @@ async def match_fact_to_forget(user_id_str: str, text_to_forget: str) -> str:
                     return old_fact
     return None
 
+def parse_trigger(content: str) -> tuple[bool, str]:
+    """Checks if message starts with triggers like 'สิริ', 'siri', 'ai' (with or without '!', case-insensitive, with/without space).
+    Returns (has_trigger, cleaned_query).
+    """
+    content_stripped = content.strip()
+    content_lower = content_stripped.lower()
+    
+    # 1. Check Thai trigger "สิริ" and its prefixed version "!สิริ"
+    for pref in ("!สิริ", "สิริ"):
+        if content_lower.startswith(pref):
+            return True, content_stripped[len(pref):].strip()
+            
+    # 2. Check English triggers
+    for pref in ("!siri", "siri", "!ai", "ai"):
+        if content_lower == pref:
+            return True, ""
+        if content_lower.startswith(pref + " ") or content_lower.startswith(pref + "\n"):
+            return True, content_stripped[len(pref):].strip()
+        
+        # Check if starts with prefix and the next char is non-alphanumeric or non-ASCII (e.g. Thai character or punctuation)
+        if content_lower.startswith(pref):
+            next_char = content_lower[len(pref):len(pref)+1]
+            if next_char and not (next_char.isalnum() and next_char.isascii()):
+                return True, content_stripped[len(pref):].strip()
+                
+    return False, ""
+
 def should_respond(message: discord.Message) -> bool:
     """Step 3: Should Respond? checks."""
     # 1. Never respond to self
@@ -156,7 +192,8 @@ def should_respond(message: discord.Message) -> bool:
             return True
             
     # 5. Respond if prefixed with a command keyword
-    if message.content.startswith("!bot "):
+    has_trigger, _ = parse_trigger(message.content)
+    if has_trigger:
         return True
 
     # 6. Respond directly to memory/reset commands
@@ -184,18 +221,31 @@ async def on_message(message: discord.Message):
     if not should_respond(message):
         return
 
-    # Trigger typing indicator to show the bot is thinking
-    async with message.channel.typing():
+    user_id_str = str(message.author.id)
+    channel_id_str = str(message.channel.id)
+    task_key = f"{channel_id_str}:{user_id_str}"
+
+    # Cancel previous active task if it exists for this user in this channel (Interactive Steering)
+    if task_key in active_tasks:
+        old_task = active_tasks[task_key]
+        if not old_task.done():
+            logger.info(f"Cancelling active task for user {user_id_str} in channel {channel_id_str} due to steering/interruption.")
+            old_task.cancel()
+
+    # Define the core processing coroutine
+    async def process_and_reply():
         try:
-            user_id_str = str(message.author.id)
-            channel_id_str = str(message.channel.id)
             user_query = message.content.strip()
             
-            # Clean up the command prefix if it has "!bot "
-            cmd_query = user_query
-            if cmd_query.startswith("!bot "):
-                cmd_query = "!" + cmd_query[5:].strip()
-                
+            # Clean up the command prefix using parse_trigger
+            has_trigger, cmd_query = parse_trigger(user_query)
+            if not has_trigger:
+                cmd_query = user_query
+            else:
+                # Match command routing by adding "!" back if it starts with memory commands
+                if cmd_query.startswith(("remember ", "forget ", "forgetall", "reset")):
+                    cmd_query = "!" + cmd_query
+
             # Intercept commands
             if cmd_query.startswith("!remember ") and db:
                 fact_to_save = cmd_query[10:].strip()
@@ -235,178 +285,208 @@ async def on_message(message: discord.Message):
                 await message.reply("ล้างประวัติการคุยและฐานความรู้ในช่องแชทนี้เรียบร้อยแล้วครับ! เริ่มต้นบทสนทนาใหม่ได้เลย 🧹✨")
                 return
 
-            # Step 4: Context Building
-            # A. Retrieve Short-term context (recent 50 messages)
-            recent_history = []
-            if db:
-                raw_history = await asyncio.to_thread(db.get_recent_history, channel_id_str, limit=30)
-                recent_history = [f"{msg['username']}: {msg['content']}" for msg in raw_history]
-            
-            # B. Retrieve Long-term context (Semantic Search top 5)
-            semantic_context = []
-            if db and ai and len(user_query.strip()) > 5:
-                query_emb = await asyncio.to_thread(ai.get_embedding, user_query)
-                if query_emb:
-                    raw_semantic = await asyncio.to_thread(db.search_semantic_history, channel_id_str, query_emb, limit=5)
-                    semantic_context = [row['content'] for row in raw_semantic]
+            # Trigger typing indicator since it is not a direct command
+            async with message.channel.typing():
+                # Step 4: Context Building
+                # A. Retrieve Short-term context (recent 30 messages)
+                recent_history = []
+                if db:
+                    raw_history = await asyncio.to_thread(db.get_recent_history, channel_id_str, limit=30)
+                    recent_history = [f"{msg['username']}: {msg['content']}" for msg in raw_history]
+                
+                # B. Retrieve Long-term context (Semantic Search top 5)
+                semantic_context = []
+                if db and ai and len(user_query.strip()) > 5:
+                    query_emb = await asyncio.to_thread(ai.get_embedding, user_query)
+                    if query_emb:
+                        raw_semantic = await asyncio.to_thread(db.search_semantic_history, channel_id_str, query_emb, limit=5)
+                        semantic_context = [row['content'] for row in raw_semantic]
 
-            # C. Retrieve User Memory / Facts
-            user_facts = []
-            if db:
-                user_facts = await asyncio.to_thread(db.get_user_facts, user_id_str)
+                # C. Retrieve User Memory / Facts
+                user_facts = []
+                if db:
+                    user_facts = await asyncio.to_thread(db.get_user_facts, user_id_str)
 
-            # Step 6: Harness Assembly (Structured 8-layered prompt using prompts.py)
-            system_instruction = build_system_instruction(
-                user_facts=user_facts,
-                semantic_context=semantic_context
-            )
-
-            # Assemble conversation history and user query
-            history_text = "\n".join(recent_history)
-            final_prompt = (
-                f"Conversation history of the channel:\n{history_text}\n\n"
-                f"User's current message: {user_query}\n"
-                "Reply to the user directly and naturally."
-            )
-
-            # Initialize conversation history with user message
-            contents = [
-                types.Content(
-                    role="user",
-                    parts=[types.Part.from_text(text=final_prompt)]
+                # Step 6: Harness Assembly (Structured 8-layered prompt using prompts.py)
+                system_instruction = build_system_instruction(
+                    user_facts=user_facts,
+                    semantic_context=semantic_context
                 )
-            ]
 
-            # Tool Execution Handler
-            async def execute_tool(name: str, args: dict) -> str:
-                logger.info(f"Executing tool '{name}' with args: {args}")
-                if name == "tavily_search":
-                    query = args.get("query")
-                    if not query:
-                        return "Error: Missing query argument."
-                    search_depth = args.get("search_depth", "basic")
-                    topic = args.get("topic", "general")
-                    time_range = args.get("time_range")
-                    return await asyncio.to_thread(
-                        ai.perform_search,
-                        query=query,
-                        search_depth=search_depth,
-                        topic=topic,
-                        time_range=time_range
+                # Assemble conversation history and user query
+                history_text = "\n".join(recent_history)
+                final_prompt = (
+                    f"Conversation history of the channel:\n{history_text}\n\n"
+                    f"User's current message: {user_query}\n"
+                    "Reply to the user directly and naturally."
+                )
+
+                # Initialize conversation history with user message
+                contents = [
+                    types.Content(
+                        role="user",
+                        parts=[types.Part.from_text(text=final_prompt)]
                     )
+                ]
 
-                elif name == "tavily_extract":
-                    urls = args.get("urls")
-                    if not urls:
-                        return "Error: Missing urls argument."
-                    if isinstance(urls, str):
-                        urls = [urls]
-                    return await asyncio.to_thread(ai.perform_extract, urls=urls)
+                # Tool Execution Handler with Caching logic to prevent redundant calls
+                async def execute_tool(name: str, args: dict) -> str:
+                    logger.info(f"Executing tool '{name}' with args: {args}")
+                    
+                    # Read caching for search & research tools
+                    if name in ("tavily_search", "tavily_research"):
+                        query = args.get("query")
+                        if query:
+                            cached = tool_cache.get(task_key)
+                            if cached and cached.get("tool") == name and cached.get("query") == query:
+                                logger.info(f"Steering optimization: Reusing cached tool result for '{name}' (query: '{query}')")
+                                return cached.get("result")
 
-                elif name == "tavily_crawl":
-                    url = args.get("url")
-                    if not url:
-                        return "Error: Missing url argument."
-                    limit = args.get("limit", 3)
-                    return await asyncio.to_thread(ai.perform_crawl, url=url, limit=limit)
+                    if name == "tavily_search":
+                        query = args.get("query")
+                        if not query:
+                            return "Error: Missing query argument."
+                        search_depth = args.get("search_depth", "basic")
+                        topic = args.get("topic", "general")
+                        time_range = args.get("time_range")
+                        res = await asyncio.to_thread(
+                            ai.perform_search,
+                            query=query,
+                            search_depth=search_depth,
+                            topic=topic,
+                            time_range=time_range
+                        )
+                        # Save to cache
+                        tool_cache[task_key] = {"tool": name, "query": query, "result": res}
+                        return res
 
-                elif name == "tavily_research":
-                    query = args.get("query")
-                    if not query:
-                        return "Error: Missing query argument."
-                    model = args.get("model", "mini")
-                    return await asyncio.to_thread(ai.perform_research, query=query, model=model)
+                    elif name == "tavily_extract":
+                        urls = args.get("urls")
+                        if not urls:
+                            return "Error: Missing urls argument."
+                        if isinstance(urls, str):
+                            urls = [urls]
+                        return await asyncio.to_thread(ai.perform_extract, urls=urls)
 
+                    elif name == "tavily_crawl":
+                        url = args.get("url")
+                        if not url:
+                            return "Error: Missing url argument."
+                        limit = args.get("limit", 3)
+                        return await asyncio.to_thread(ai.perform_crawl, url=url, limit=limit)
 
+                    elif name == "tavily_research":
+                        query = args.get("query")
+                        if not query:
+                            return "Error: Missing query argument."
+                        model = args.get("model", "mini")
+                        res = await asyncio.to_thread(ai.perform_research, query=query, model=model)
+                        # Save to cache
+                        tool_cache[task_key] = {"tool": name, "query": query, "result": res}
+                        return res
 
+                    elif name == "add_reaction":
+                        emoji = args.get("emoji")
+                        if not emoji:
+                            return "Error: Missing emoji argument."
+                        try:
+                            await message.add_reaction(emoji)
+                            return f"Successfully added reaction: {emoji}"
+                        except Exception as e:
+                            return f"Error adding reaction: {e}"
+                            
+                    elif name == "pin_message":
+                        try:
+                            await message.pin()
+                            return "Successfully pinned the message."
+                        except Exception as e:
+                            return f"Error pinning message: {e}"
+                            
+                    elif name == "create_thread":
+                        thread_name = args.get("name", "AI Conversation Thread")
+                        try:
+                            thread = await message.create_thread(name=thread_name)
+                            return f"Successfully created thread: {thread.name}"
+                        except Exception as e:
+                            return f"Error creating thread: {e}"
+                            
+                    elif name == "send_dm":
+                        dm_content = args.get("content")
+                        if not dm_content:
+                            return "Error: Missing content argument."
+                        try:
+                            await message.author.send(dm_content)
+                            return "Successfully sent private Direct Message to the user."
+                        except Exception as e:
+                            return f"Error sending DM (user may have DMs closed): {e}"
+                            
+                    return f"Error: Unknown tool '{name}'."
 
-                elif name == "add_reaction":
-                    emoji = args.get("emoji")
-                    if not emoji:
-                        return "Error: Missing emoji argument."
-                    try:
-                        await message.add_reaction(emoji)
-                        return f"Successfully added reaction: {emoji}"
-                    except Exception as e:
-                        return f"Error adding reaction: {e}"
-                        
-                elif name == "pin_message":
-                    try:
-                        await message.pin()
-                        return "Successfully pinned the message."
-                    except Exception as e:
-                        return f"Error pinning message: {e}"
-                        
-                elif name == "create_thread":
-                    thread_name = args.get("name", "AI Conversation Thread")
-                    try:
-                        thread = await message.create_thread(name=thread_name)
-                        return f"Successfully created thread: {thread.name}"
-                    except Exception as e:
-                        return f"Error creating thread: {e}"
-                        
-                elif name == "send_dm":
-                    dm_content = args.get("content")
-                    if not dm_content:
-                        return "Error: Missing content argument."
-                    try:
-                        await message.author.send(dm_content)
-                        return "Successfully sent private Direct Message to the user."
-                    except Exception as e:
-                        return f"Error sending DM (user may have DMs closed): {e}"
-                        
-                return f"Error: Unknown tool '{name}'."
-
-            # Step 7: AI Execution
-            response = await asyncio.to_thread(ai.generate_reply, system_instruction, contents, BOT_TOOLS)
-            
-            if not response:
-                await message.reply("ขออภัย เกิดข้อผิดพลาดในการประมวลผลข้อความของคุณ")
-                return
-
-            # Multi-turn Tool Calling Loop (up to 5 rounds)
-            round_limit = 5
-            current_round = 0
-            
-            while response and response.function_calls and current_round < round_limit:
-                current_round += 1
-                logger.info(f"Tool execution round {current_round}/{round_limit}")
-                
-                # 1. Append original assistant tool call content
-                contents.append(response.candidates[0].content)
-                
-                # 2. Execute all tool calls asynchronously
-                tool_parts = []
-                for call in response.function_calls:
-                    tool_result = await execute_tool(call.name, call.args)
-                    part = types.Part.from_function_response(
-                        name=call.name,
-                        response={"result": tool_result}
-                    )
-                    tool_parts.append(part)
-                
-                # 3. Append tool responses to content history
-                contents.append(types.Content(role="tool", parts=tool_parts))
-                
-                # 4. Request next response/calls based on tool results
+                # Step 7: AI Execution
                 response = await asyncio.to_thread(ai.generate_reply, system_instruction, contents, BOT_TOOLS)
-            
-            if response and response.text:
-                reply = response.text
-            else:
-                reply = "ดำเนินการตามคำสั่งของท่านเสร็จสิ้นแล้ว"
+                
+                if not response:
+                    await message.reply("ขออภัย เกิดข้อผิดพลาดในการประมวลผลข้อความของคุณ")
+                    return
 
+                # Multi-turn Tool Calling Loop (up to 5 rounds)
+                round_limit = 5
+                current_round = 0
+                
+                while response and response.function_calls and current_round < round_limit:
+                    current_round += 1
+                    logger.info(f"Tool execution round {current_round}/{round_limit}")
+                    
+                    # 1. Append original assistant tool call content
+                    contents.append(response.candidates[0].content)
+                    
+                    # 2. Execute all tool calls asynchronously
+                    tool_parts = []
+                    for call in response.function_calls:
+                        tool_result = await execute_tool(call.name, call.args)
+                        part = types.Part.from_function_response(
+                            name=call.name,
+                            response={"result": tool_result}
+                        )
+                        tool_parts.append(part)
+                    
+                    # 3. Append tool responses to content history
+                    contents.append(types.Content(role="tool", parts=tool_parts))
+                    
+                    # 4. Request next response/calls based on tool results
+                    response = await asyncio.to_thread(ai.generate_reply, system_instruction, contents, BOT_TOOLS)
+                
+                if response and response.text:
+                    reply = response.text
+                else:
+                    reply = "ดำเนินการตามคำสั่งของท่านเสร็จสิ้นแล้ว"
 
-            # Discord message limit is 2000 characters
-            if len(reply) > 2000:
-                for i in range(0, len(reply), 1950):
-                    await message.reply(reply[i:i+1950])
-            else:
-                await message.reply(reply)
+                # Discord message limit is 2000 characters
+                if len(reply) > 2000:
+                    for i in range(0, len(reply), 1950):
+                        await message.reply(reply[i:i+1950])
+                else:
+                    await message.reply(reply)
 
+                # Clear cache on successful generation completion
+                tool_cache.pop(task_key, None)
+
+        except asyncio.CancelledError:
+            logger.info(f"Task for key {task_key} was cancelled due to steering/interruption.")
+            # Keep tool_cache intact so the next steered task can reuse already completed search results
+            raise
         except Exception as e:
             logger.error(f"Error processing message: {e}")
             await message.reply("ขออภัย เกิดข้อผิดพลาดในการประมวลผลข้อความของคุณ")
+        finally:
+            # Safely remove this task from active_tasks registry when finished
+            if active_tasks.get(task_key) == asyncio.current_task():
+                active_tasks.pop(task_key, None)
+
+    # Register and start the asyncio Task
+    new_task = asyncio.create_task(process_and_reply())
+    active_tasks[task_key] = new_task
+
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
