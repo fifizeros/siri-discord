@@ -13,7 +13,7 @@ class DatabaseManager:
         self.client: Client = create_client(url, key)
 
     def save_message(self, message_id: str, channel_id: str, user_id: str, username: str, content: str):
-        """Saves a message to the chat_history table. IDs are passed as strings to prevent JS/py float overflow, but cast to BIGINT in DB."""
+        """Saves a message to the chat_history table and prunes messages older than 30 days."""
         try:
             data = {
                 "message_id": message_id,
@@ -23,8 +23,39 @@ class DatabaseManager:
                 "content": content
             }
             self.client.table("chat_history").insert(data).execute()
+            
+            # Auto-prune messages older than 30 days to prevent storage bloat
+            try:
+                import datetime
+                threshold = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=30)).isoformat()
+                self.client.table("chat_history").delete().lt("created_at", threshold).execute()
+            except Exception as prune_err:
+                logger.error(f"Error pruning old chat history: {prune_err}")
+                
         except Exception as e:
             logger.error(f"Error saving message {message_id}: {e}")
+
+    def delete_user_fact(self, user_id: str, fact: str):
+        """Deletes a specific learned fact about a user."""
+        try:
+            self.client.table("user_facts").delete().eq("user_id", user_id).eq("fact", fact).execute()
+        except Exception as e:
+            logger.error(f"Error deleting fact for user {user_id}: {e}")
+
+    def delete_all_user_facts(self, user_id: str):
+        """Deletes all facts/memories stored for a specific user."""
+        try:
+            self.client.table("user_facts").delete().eq("user_id", user_id).execute()
+        except Exception as e:
+            logger.error(f"Error deleting all facts for user {user_id}: {e}")
+
+    def reset_channel_history(self, channel_id: str):
+        """Deletes all chat history and associated embeddings for a channel."""
+        try:
+            self.client.table("chat_history").delete().eq("channel_id", channel_id).execute()
+        except Exception as e:
+            logger.error(f"Error resetting history for channel {channel_id}: {e}")
+
 
     def get_recent_history(self, channel_id: str, limit: int = 50):
         """Fetches recent message history for a channel, ordered chronologically."""

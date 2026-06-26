@@ -69,6 +69,72 @@ async def async_embed_and_save(message_id: str, content: str):
     except Exception as e:
         logger.error(f"Failed to process embedding for message {message_id}: {e}")
 
+async def consolidate_memory(user_id_str: str, new_fact: str) -> list[str]:
+    """Asks Gemini to check if the new fact contradicts/overrides any existing facts, and deletes them."""
+    existing_facts = await asyncio.to_thread(db.get_user_facts, user_id_str)
+    if not existing_facts:
+        return []
+        
+    facts_str = "\n".join([f"- {f}" for f in existing_facts])
+    prompt = (
+        "คุณคือระบบผู้ช่วยจัดการความทรงจำ หน้าที่ของคุณคือเปรียบเทียบข้อมูลเก่ากับข้อมูลใหม่เพื่อหาข้อมูลที่ขัดแย้ง ซ้ำซ้อน หรือล้าสมัย\n\n"
+        f"นี่คือรายการข้อมูลเก่าที่คุณจำเกี่ยวกับผู้ใช้คนนี้:\n{facts_str}\n\n"
+        f"นี่คือข้อมูลใหม่ที่ผู้ใช้เพิ่งบอก:\n- {new_fact}\n\n"
+        "คำแนะนำ:\n"
+        "1. หาข้อความเก่าที่มีเนื้อหาขัดแย้ง ซ้ำซ้อน หรือถูกทดแทนด้วยข้อมูลใหม่นี้โดยสิ้นเชิง\n"
+        "2. หากมีข้อมูลเก่าที่ควรถูกลบออก ให้ลิสต์ข้อความเก่าเหล่านั้นออกมาตรงๆ บรรทัดละข้อ โดยต้องตรงกับข้อความเก่าทุกตัวอักษร ห้ามสรุปความ ห้ามใส่ตัวเลขหรือสัญลักษณ์นำหน้า\n"
+        "3. หากไม่มีข้อความเก่าใดที่ขัดแย้งหรือซ้ำซ้อนเลย ให้ตอบคำว่า 'None' เท่านั้น\n"
+        "ตอบ:"
+    )
+    
+    response = await asyncio.to_thread(
+        ai.generate_reply,
+        system_instruction="คุณคือระบบวิเคราะห์เปรียบเทียบข้อมูล ตอบเฉพาะข้อความที่ต้องการลบตรงๆ หรือ 'None' เท่านั้น ห้ามตอบนอกเหนือจากนี้",
+        contents=[prompt]
+    )
+    
+    deleted_facts = []
+    if response and response.text:
+        lines = [line.strip().strip("-*•").strip() for line in response.text.split("\n") if line.strip()]
+        for line in lines:
+            if line == "None" or not line:
+                continue
+            for old_fact in existing_facts:
+                if old_fact.lower().strip() == line.lower().strip() or line.lower().strip() in old_fact.lower().strip():
+                    await asyncio.to_thread(db.delete_user_fact, user_id_str, old_fact)
+                    deleted_facts.append(old_fact)
+    return deleted_facts
+
+async def match_fact_to_forget(user_id_str: str, text_to_forget: str) -> str:
+    """Asks Gemini to identify which of the existing facts matches the user's forget request."""
+    existing_facts = await asyncio.to_thread(db.get_user_facts, user_id_str)
+    if not existing_facts:
+        return None
+        
+    facts_str = "\n".join([f"- {f}" for f in existing_facts])
+    prompt = (
+        "คุณคือระบบผู้ช่วยค้นหาข้อความที่จะลบ\n\n"
+        f"นี่คือรายการข้อความที่คุณจำเกี่ยวกับผู้ใช้:\n{facts_str}\n\n"
+        f"ผู้ใช้ต้องการลบความทรงจำเรื่อง: '{text_to_forget}'\n\n"
+        "โปรดเลือกข้อความเก่าจากรายการข้างต้นที่ตรงหรือใกล้เคียงที่สุดกับความต้องการที่จะลบของผู้ใช้\n"
+        "ตอบข้อความเก่านั้นตรงๆ ทุกตัวอักษร ห้ามสรุปความ ห้ามใส่ตัวเลข หากไม่พบข้อความใดที่ตรงหรือใกล้เคียงเลย ให้ตอบคำว่า 'None' เท่านั้น\n"
+        "ตอบ:"
+    )
+    
+    response = await asyncio.to_thread(
+        ai.generate_reply,
+        system_instruction="ตอบเฉพาะข้อความเก่าจากรายการที่เลือก หรือ 'None' เท่านั้น ห้ามตอบอธิบายเพิ่มเด็ดขาด",
+        contents=[prompt]
+    )
+    
+    if response and response.text:
+        ans = response.text.strip().strip("-*•").strip()
+        if ans != "None" and ans:
+            for old_fact in existing_facts:
+                if old_fact.lower().strip() == ans.lower().strip() or ans.lower().strip() in old_fact.lower().strip():
+                    return old_fact
+    return None
+
 def should_respond(message: discord.Message) -> bool:
     """Step 3: Should Respond? checks."""
     # 1. Never respond to self
@@ -91,6 +157,11 @@ def should_respond(message: discord.Message) -> bool:
             
     # 5. Respond if prefixed with a command keyword
     if message.content.startswith("!bot "):
+        return True
+
+    # 6. Respond directly to memory/reset commands
+    content_stripped = message.content.strip()
+    if content_stripped.startswith(("!remember ", "!forget ", "!forgetall", "!reset")):
         return True
 
     return False
@@ -118,8 +189,52 @@ async def on_message(message: discord.Message):
         try:
             user_id_str = str(message.author.id)
             channel_id_str = str(message.channel.id)
-            user_query = message.content
+            user_query = message.content.strip()
             
+            # Clean up the command prefix if it has "!bot "
+            cmd_query = user_query
+            if cmd_query.startswith("!bot "):
+                cmd_query = "!" + cmd_query[5:].strip()
+                
+            # Intercept commands
+            if cmd_query.startswith("!remember ") and db:
+                fact_to_save = cmd_query[10:].strip()
+                if fact_to_save:
+                    # Run consolidation check
+                    deleted = await consolidate_memory(user_id_str, fact_to_save)
+                    await asyncio.to_thread(db.save_user_fact, user_id_str, fact_to_save)
+                    if deleted:
+                        deleted_list = ", ".join([f'"{d}"' for d in deleted])
+                        await message.reply(f"บันทึกความทรงจำใหม่: \"{fact_to_save}\" เรียบร้อยแล้วครับ! (และลบความจำเดิมที่ขัดแย้งออก: {deleted_list}) 🧠✨")
+                    else:
+                        await message.reply(f"บันทึกความทรงจำแล้ว: \"{fact_to_save}\" 🧠✨")
+                else:
+                    await message.reply("โปรดระบุข้อความหลังคำสั่ง !remember เช่น `!remember ผมชอบกินกาแฟดำ`")
+                return
+
+            elif cmd_query.startswith("!forget ") and db:
+                text_to_forget = cmd_query[8:].strip()
+                if text_to_forget:
+                    matched_fact = await match_fact_to_forget(user_id_str, text_to_forget)
+                    if matched_fact:
+                        await asyncio.to_thread(db.delete_user_fact, user_id_str, matched_fact)
+                        await message.reply(f"ลบความทรงจำเรื่อง: \"{matched_fact}\" เรียบร้อยแล้วครับ! 🧹")
+                    else:
+                        await message.reply(f"ไม่พบความทรงจำที่ใกล้เคียงกับ \"{text_to_forget}\" ในระบบครับ")
+                else:
+                    await message.reply("โปรดระบุสิ่งที่ต้องการให้ลืมหลังคำสั่ง !forget เช่น `!forget เรื่องชอบกาแฟดำ`")
+                return
+
+            elif cmd_query == "!forgetall" and db:
+                await asyncio.to_thread(db.delete_all_user_facts, user_id_str)
+                await message.reply("ลบความทรงจำทั้งหมดเกี่ยวกับคุณเรียบร้อยแล้วครับ! 🧹✨")
+                return
+
+            elif cmd_query == "!reset" and db:
+                await asyncio.to_thread(db.reset_channel_history, channel_id_str)
+                await message.reply("ล้างประวัติการคุยและฐานความรู้ในช่องแชทนี้เรียบร้อยแล้วครับ! เริ่มต้นบทสนทนาใหม่ได้เลย 🧹✨")
+                return
+
             # Step 4: Context Building
             # A. Retrieve Short-term context (recent 50 messages)
             recent_history = []
@@ -249,13 +364,6 @@ async def on_message(message: discord.Message):
                     await message.reply(reply[i:i+1950])
             else:
                 await message.reply(reply)
-
-            # Memory extraction shortcut helper
-            if user_query.startswith("!remember ") and db:
-                fact_to_save = user_query[10:].strip()
-                if fact_to_save:
-                    await asyncio.to_thread(db.save_user_fact, user_id_str, fact_to_save)
-                    await message.reply(f"บันทึกความจำแล้ว: \"{fact_to_save}\"")
 
         except Exception as e:
             logger.error(f"Error processing message: {e}")
