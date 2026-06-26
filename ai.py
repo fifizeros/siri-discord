@@ -18,7 +18,7 @@ class AIManager:
         self.tavily = TavilyClient(api_key=tavily_key) if tavily_key else None
         
         # Primary models as requested
-        self.chat_model = "gemma-4-31b-it"
+        self.chat_model = "gemini-3.1-flash-lite"
         self.embedding_model = "gemini-embedding-001"
 
     def get_embedding(self, text: str) -> list[float]:
