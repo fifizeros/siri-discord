@@ -37,15 +37,20 @@ class AIManager:
             logger.error(f"Error generating embedding: {e}")
             return []
 
-    def perform_search(self, query: str) -> str:
+    def perform_search(self, query: str, search_depth: str = "basic", topic: str = "general", time_range: str = None) -> str:
         """Searches the web using Tavily API and returns a formatted summary of findings."""
         if not self.tavily:
             return "Web search is currently disabled (TAVILY_API_KEY is not configured)."
         
         try:
-            logger.info(f"Performing Tavily web search for: '{query}'")
-            # Get simple search results with basic depth
-            response = self.tavily.search(query=query, search_depth="basic", max_results=5)
+            logger.info(f"Performing Tavily web search for: '{query}' (depth: {search_depth}, topic: {topic}, time_range: {time_range})")
+            response = self.tavily.search(
+                query=query,
+                search_depth=search_depth,
+                topic=topic,
+                time_range=time_range,
+                max_results=5
+            )
             results = response.get("results", [])
             answer = response.get("answer")
             
@@ -68,6 +73,85 @@ class AIManager:
         except Exception as e:
             logger.error(f"Error performing web search: {e}")
             return f"Error executing search: {str(e)}"
+
+    def perform_extract(self, urls: list[str]) -> str:
+        """Extracts cleaned markdown content from a list of web URLs using Tavily Extract."""
+        if not self.tavily:
+            return "Web extraction is currently disabled (TAVILY_API_KEY is not configured)."
+        try:
+            logger.info(f"Performing Tavily extract for URLs: {urls}")
+            response = self.tavily.extract(urls=urls)
+            results = response.get("results", [])
+            failed = response.get("failed_results", [])
+            
+            formatted_results = []
+            for res in results:
+                url = res.get("url")
+                title = res.get("title", "No Title")
+                content = res.get("raw_content", "")
+                formatted_results.append(f"### Extracted URL: {url}\nTitle: {title}\nContent:\n{content}\n")
+            
+            for f in failed:
+                formatted_results.append(f"### Failed to extract: {f.get('url')} (Error: {f.get('error')})")
+                
+            if not formatted_results:
+                return "No content could be extracted."
+                
+            return "\n".join(formatted_results)
+        except Exception as e:
+            logger.error(f"Error performing extract: {e}")
+            return f"Error executing extract: {str(e)}"
+
+    def perform_crawl(self, url: str, limit: int = 3) -> str:
+        """Crawls a website and extracts content from multiple pages using Tavily Crawl."""
+        if not self.tavily:
+            return "Web crawling is currently disabled (TAVILY_API_KEY is not configured)."
+        try:
+            logger.info(f"Performing Tavily crawl for: {url} (limit: {limit})")
+            response = self.tavily.crawl(url=url, max_depth=1, limit=limit)
+            results = response.get("results", [])
+            
+            formatted_results = []
+            for res in results:
+                page_url = res.get("url")
+                content = res.get("raw_content", "")
+                formatted_results.append(f"### Crawled URL: {page_url}\nContent:\n{content}\n")
+                
+            if not formatted_results:
+                return "No crawl results found."
+                
+            return "\n".join(formatted_results)
+        except Exception as e:
+            logger.error(f"Error performing crawl: {e}")
+            return f"Error executing crawl: {str(e)}"
+
+    def perform_research(self, query: str, model: str = "mini") -> str:
+        """Runs a deep research task using Tavily Research API and polls for completion."""
+        if not self.tavily:
+            return "Web research is currently disabled (TAVILY_API_KEY is not configured)."
+        try:
+            logger.info(f"Starting Tavily research for: '{query}' (model: {model})")
+            task = self.tavily.research(input=query, model=model)
+            request_id = task.get("request_id")
+            
+            # Poll for results
+            import time
+            for _ in range(12): # Poll for up to 60 seconds (12 * 5 seconds)
+                time.sleep(5)
+                res = self.tavily.get_research(request_id)
+                status = res.get("status")
+                if status == "completed":
+                    content = res.get("content", "")
+                    return f"### Deep Research Report:\n{content}"
+                elif status == "failed":
+                    return "Error: Deep research task failed on the server."
+            
+            return f"Timeout: Research is still processing (Task ID: {request_id}). Please check again later."
+        except Exception as e:
+            logger.error(f"Error performing research: {e}")
+            return f"Error executing research: {str(e)}"
+
+
 
     def generate_reply(self, system_instruction: str, contents: list, tools: list = None) -> any:
         """Generates text reply or function calls from Gemma/Gemini based on system instruction, contents, and tools."""

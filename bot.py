@@ -280,11 +280,44 @@ async def on_message(message: discord.Message):
             # Tool Execution Handler
             async def execute_tool(name: str, args: dict) -> str:
                 logger.info(f"Executing tool '{name}' with args: {args}")
-                if name == "web_search":
+                if name == "tavily_search":
                     query = args.get("query")
                     if not query:
                         return "Error: Missing query argument."
-                    return await asyncio.to_thread(ai.perform_search, query=query)
+                    search_depth = args.get("search_depth", "basic")
+                    topic = args.get("topic", "general")
+                    time_range = args.get("time_range")
+                    return await asyncio.to_thread(
+                        ai.perform_search,
+                        query=query,
+                        search_depth=search_depth,
+                        topic=topic,
+                        time_range=time_range
+                    )
+
+                elif name == "tavily_extract":
+                    urls = args.get("urls")
+                    if not urls:
+                        return "Error: Missing urls argument."
+                    if isinstance(urls, str):
+                        urls = [urls]
+                    return await asyncio.to_thread(ai.perform_extract, urls=urls)
+
+                elif name == "tavily_crawl":
+                    url = args.get("url")
+                    if not url:
+                        return "Error: Missing url argument."
+                    limit = args.get("limit", 3)
+                    return await asyncio.to_thread(ai.perform_crawl, url=url, limit=limit)
+
+                elif name == "tavily_research":
+                    query = args.get("query")
+                    if not query:
+                        return "Error: Missing query argument."
+                    model = args.get("model", "mini")
+                    return await asyncio.to_thread(ai.perform_research, query=query, model=model)
+
+
 
 
                 elif name == "add_reaction":

@@ -1,5 +1,6 @@
 # prompts.py
 import os
+from datetime import datetime, timezone, timedelta
 
 """
 This module holds the static and dynamic parts of the 8-layered Agent system prompt.
@@ -44,13 +45,19 @@ def _read_prompt_file(filename: str, default_content: str) -> str:
             pass
     return default_content
 
-def build_system_instruction(user_facts: list[str] = None, semantic_context: list[str] = None) -> str:
+def build_system_instruction(user_facts: list[str] = None, semantic_context: list[str] = None, current_time_str: str = None) -> str:
     """Builds the full 8-layered system prompt instruction string dynamically by reading markdown files."""
     identity = _read_prompt_file("identity.md", DEFAULT_IDENTITY)
     rules = _read_prompt_file("rules.md", DEFAULT_RULES)
     resp_format = _read_prompt_file("format.md", DEFAULT_FORMAT)
     
     prompt = identity + rules + resp_format
+    
+    # Layer: Temporal Context (Thailand Time)
+    if not current_time_str:
+        tz_th = timezone(timedelta(hours=7))
+        current_time_str = datetime.now(tz_th).strftime("%A, %B %d, %Y, %H:%M:%S (UTC+7)")
+    prompt += f"Current Date & Time in Thailand: {current_time_str}\n\n"
     
     # Layer 4: User Memory (dynamic)
     if user_facts:

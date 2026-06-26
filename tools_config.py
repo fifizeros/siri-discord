@@ -7,23 +7,96 @@ Manually defining schemas using types.FunctionDeclaration is 100% robust and ens
 that Gemma 4 and Gemini Flash models correctly trigger function calling.
 """
 
-# 1. web_search
-web_search_decl = types.FunctionDeclaration(
-    name="web_search",
-    description="Searches the web for real-time information on a topic, weather, news, or facts you don't know.",
+# 1. tavily_search
+tavily_search_decl = types.FunctionDeclaration(
+    name="tavily_search",
+    description="Searches the web for real-time facts, news, or weather. Allows selecting basic/advanced depth, news topic, and time ranges.",
     parameters=types.Schema(
         type="OBJECT",
         properties={
             "query": types.Schema(
                 type="STRING",
-                description="The search query to look up on the web (e.g. 'weather in Chiang Mai')."
+                description="The search query to look up on the web."
+            ),
+            "search_depth": types.Schema(
+                type="STRING",
+                enum=["basic", "advanced"],
+                description="The depth of search. Use 'advanced' for complex queries requiring deep information and 'basic' for quick facts."
+            ),
+            "topic": types.Schema(
+                type="STRING",
+                enum=["general", "news"],
+                description="Search category. Use 'news' for current events and recent articles."
+            ),
+            "time_range": types.Schema(
+                type="STRING",
+                enum=["day", "week", "month", "year"],
+                description="Optionally filter news/search results to a specific timeframe."
             )
         },
         required=["query"]
     )
 )
 
-# 2. add_reaction
+# 2. tavily_extract
+tavily_extract_decl = types.FunctionDeclaration(
+    name="tavily_extract",
+    description="Extracts clean markdown content from specific web page URLs to read full article/document content.",
+    parameters=types.Schema(
+        type="OBJECT",
+        properties={
+            "urls": types.Schema(
+                type="ARRAY",
+                items=types.Schema(type="STRING"),
+                description="A list of specific web page URLs to extract text from."
+            )
+        },
+        required=["urls"]
+    )
+)
+
+# 3. tavily_crawl
+tavily_crawl_decl = types.FunctionDeclaration(
+    name="tavily_crawl",
+    description="Crawls a website starting from a root URL and extracts content from multiple subpages.",
+    parameters=types.Schema(
+        type="OBJECT",
+        properties={
+            "url": types.Schema(
+                type="STRING",
+                description="The root URL of the website to crawl."
+            ),
+            "limit": types.Schema(
+                type="INTEGER",
+                description="Maximum number of subpages to crawl (default is 3)."
+            )
+        },
+        required=["url"]
+    )
+)
+
+# 4. tavily_research
+tavily_research_decl = types.FunctionDeclaration(
+    name="tavily_research",
+    description="Runs an autonomous multi-step deep research task and returns a comprehensive report. Use for complex research questions.",
+    parameters=types.Schema(
+        type="OBJECT",
+        properties={
+            "query": types.Schema(
+                type="STRING",
+                description="The complex research query to investigate."
+            ),
+            "model": types.Schema(
+                type="STRING",
+                enum=["mini", "pro"],
+                description="The research model. Use 'pro' for comprehensive analysis and 'mini' for faster research."
+            )
+        },
+        required=["query"]
+    )
+)
+
+# 4. add_reaction
 add_reaction_decl = types.FunctionDeclaration(
     name="add_reaction",
     description="Adds a reaction emoji to the user's current message.",
@@ -39,7 +112,7 @@ add_reaction_decl = types.FunctionDeclaration(
     )
 )
 
-# 3. pin_message
+# 5. pin_message
 pin_message_decl = types.FunctionDeclaration(
     name="pin_message",
     description="Pins the user's current message to the channel.",
@@ -49,7 +122,7 @@ pin_message_decl = types.FunctionDeclaration(
     )
 )
 
-# 4. create_thread
+# 6. create_thread
 create_thread_decl = types.FunctionDeclaration(
     name="create_thread",
     description="Creates a new public thread conversation starting from the user's current message.",
@@ -65,7 +138,7 @@ create_thread_decl = types.FunctionDeclaration(
     )
 )
 
-# 5. send_dm
+# 7. send_dm
 send_dm_decl = types.FunctionDeclaration(
     name="send_dm",
     description="Sends a private Direct Message (DM) to the user who sent the current message.",
@@ -85,7 +158,10 @@ send_dm_decl = types.FunctionDeclaration(
 BOT_TOOLS = [
     types.Tool(
         function_declarations=[
-            web_search_decl,
+            tavily_search_decl,
+            tavily_extract_decl,
+            tavily_crawl_decl,
+            tavily_research_decl,
             add_reaction_decl,
             pin_message_decl,
             create_thread_decl,
@@ -93,3 +169,4 @@ BOT_TOOLS = [
         ]
     )
 ]
+
