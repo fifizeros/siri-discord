@@ -44,20 +44,26 @@ class AIManager:
         
         try:
             logger.info(f"Performing Tavily web search for: '{query}'")
-            # Get simple search results
-            response = self.tavily.search(query=query, max_results=5)
+            # Get simple search results with basic depth
+            response = self.tavily.search(query=query, search_depth="basic", max_results=5)
             results = response.get("results", [])
+            answer = response.get("answer")
             
-            if not results:
+            if not results and not answer:
                 return "No search results found."
             
             formatted_results = []
-            for i, res in enumerate(results, 1):
-                title = res.get("title", "No Title")
-                url = res.get("url", "")
-                content = res.get("content", "")
-                formatted_results.append(f"[{i}] {title}\nURL: {url}\nContent: {content}\n")
+            if answer:
+                formatted_results.append(f"### Direct Answer:\n{answer}\n")
                 
+            if results:
+                formatted_results.append("### Search Results:")
+                for i, res in enumerate(results, 1):
+                    title = res.get("title", "No Title")
+                    url = res.get("url", "")
+                    content = res.get("content", "")
+                    formatted_results.append(f"[{i}] {title}\nURL: {url}\nContent: {content}\n")
+                    
             return "\n".join(formatted_results)
         except Exception as e:
             logger.error(f"Error performing web search: {e}")

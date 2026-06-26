@@ -169,8 +169,9 @@ async def on_message(message: discord.Message):
                     query = args.get("query")
                     if not query:
                         return "Error: Missing query argument."
-                    return await asyncio.to_thread(ai.perform_search, query)
-                    
+                    return await asyncio.to_thread(ai.perform_search, query=query)
+
+
                 elif name == "add_reaction":
                     emoji = args.get("emoji")
                     if not emoji:
