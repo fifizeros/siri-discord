@@ -331,8 +331,14 @@ async def on_message(message: discord.Message):
                 await message.reply("ขออภัย เกิดข้อผิดพลาดในการประมวลผลข้อความของคุณ")
                 return
 
-            # Check if Gemma decided to call one or more tools
-            if response.function_calls:
+            # Multi-turn Tool Calling Loop (up to 5 rounds)
+            round_limit = 5
+            current_round = 0
+            
+            while response and response.function_calls and current_round < round_limit:
+                current_round += 1
+                logger.info(f"Tool execution round {current_round}/{round_limit}")
+                
                 # 1. Append original assistant tool call content
                 contents.append(response.candidates[0].content)
                 
@@ -349,14 +355,14 @@ async def on_message(message: discord.Message):
                 # 3. Append tool responses to content history
                 contents.append(types.Content(role="tool", parts=tool_parts))
                 
-                # 4. Request final response based on tool results
-                final_response = await asyncio.to_thread(ai.generate_reply, system_instruction, contents, BOT_TOOLS)
-                if final_response and final_response.text:
-                    reply = final_response.text
-                else:
-                    reply = "ดำเนินการตามคำสั่งของท่านเสร็จสิ้นแล้ว"
+                # 4. Request next response/calls based on tool results
+                response = await asyncio.to_thread(ai.generate_reply, system_instruction, contents, BOT_TOOLS)
+            
+            if response and response.text:
+                reply = response.text
             else:
-                reply = response.text or "ขออภัย ฉันไม่สามารถหาข้อมูลเพื่อตอบคุณในขณะนี้ได้"
+                reply = "ดำเนินการตามคำสั่งของท่านเสร็จสิ้นแล้ว"
+
 
             # Discord message limit is 2000 characters
             if len(reply) > 2000:
