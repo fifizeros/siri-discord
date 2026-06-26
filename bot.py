@@ -171,6 +171,19 @@ def parse_trigger(content: str) -> tuple[bool, str]:
                 
     return False, ""
 
+def is_user_command(message: discord.Message) -> bool:
+    """Checks if the user's message is a memory or reset command to avoid saving it to history."""
+    if message.author == client.user:
+        return False
+    content = message.content.strip()
+    if content.startswith(("!remember ", "!forget ", "!forgetall", "!reset")):
+        return True
+    has_trigger, cleaned = parse_trigger(content)
+    if has_trigger:
+        if cleaned.startswith(("remember ", "forget ", "forgetall", "reset")):
+            return True
+    return False
+
 def should_respond(message: discord.Message) -> bool:
     """Step 3: Should Respond? checks."""
     # 1. Never respond to self
@@ -211,10 +224,11 @@ async def on_ready():
 @client.event
 async def on_message(message: discord.Message):
     # Step 2: Persist message asynchronously (Non-blocking)
-    if db:
-        asyncio.create_task(async_save_message(message))
-        # Embed the message for semantic search in the background (only if it's not the bot's own message)
-        if message.author != client.user:
+    # Only save user messages, and ignore commands
+    if db and message.author != client.user:
+        if not is_user_command(message):
+            asyncio.create_task(async_save_message(message))
+            # Embed the message for semantic search in the background
             asyncio.create_task(async_embed_and_save(str(message.id), message.content))
 
     # Step 3: Should Respond?
@@ -464,9 +478,13 @@ async def on_message(message: discord.Message):
                 # Discord message limit is 2000 characters
                 if len(reply) > 2000:
                     for i in range(0, len(reply), 1950):
-                        await message.reply(reply[i:i+1950])
+                        sent_msg = await message.reply(reply[i:i+1950])
+                        if db:
+                            asyncio.create_task(async_save_message(sent_msg))
                 else:
-                    await message.reply(reply)
+                    sent_msg = await message.reply(reply)
+                    if db:
+                        asyncio.create_task(async_save_message(sent_msg))
 
                 # Clear cache on successful generation completion
                 tool_cache.pop(task_key, None)
