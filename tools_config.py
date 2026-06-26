@@ -154,6 +154,21 @@ send_dm_decl = types.FunctionDeclaration(
     )
 )
 
+# 8. disconnect_voice
+disconnect_voice_decl = types.FunctionDeclaration(
+    name="disconnect_voice",
+    description="Disconnects/kicks a member from their current voice channel. Requires the bot to have 'Move Members' permission.",
+    parameters=types.Schema(
+        type="OBJECT",
+        properties={
+            "user_id": types.Schema(
+                type="STRING",
+                description="Optional Discord User ID of the member to disconnect. If omitted, it will disconnect the user who sent the command."
+            )
+        }
+    )
+)
+
 # Export the list of tools wrapped in types.Tool for the Gemini client config
 BOT_TOOLS = [
     types.Tool(
@@ -165,7 +180,8 @@ BOT_TOOLS = [
             add_reaction_decl,
             pin_message_decl,
             create_thread_decl,
-            send_dm_decl
+            send_dm_decl,
+            disconnect_voice_decl
         ]
     )
 ]

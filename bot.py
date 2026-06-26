@@ -436,6 +436,36 @@ async def on_message(message: discord.Message):
                         except Exception as e:
                             return f"Error sending DM (user may have DMs closed): {e}"
                             
+                    elif name == "disconnect_voice":
+                        target_user_id = args.get("user_id")
+                        if not message.guild:
+                            return "Error: This tool can only be executed within a Discord server."
+                        try:
+                            if target_user_id:
+                                member = message.guild.get_member(int(target_user_id))
+                                if not member:
+                                    member = await message.guild.fetch_member(int(target_user_id))
+                            else:
+                                member = message.guild.get_member(message.author.id)
+                                if not member:
+                                    member = await message.guild.fetch_member(message.author.id)
+                        except Exception as e:
+                            return f"Error resolving guild member: {e}"
+                            
+                        if not member:
+                            return "Error: Could not find the member in this server."
+                            
+                        if not member.voice or not member.voice.channel:
+                            return f"Error: {member.display_name} is not currently in a voice channel."
+                            
+                        try:
+                            await member.move_to(None)
+                            return f"Successfully disconnected {member.display_name} from the voice channel."
+                        except discord.Forbidden:
+                            return "Error: Siri lacks 'Move Members' permission in this server to disconnect this user."
+                        except Exception as e:
+                            return f"Error disconnecting member: {e}"
+                            
                     return f"Error: Unknown tool '{name}'."
 
                 # Step 7: AI Execution
