@@ -1,6 +1,8 @@
 import os
 import asyncio
 import logging
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import discord
 from dotenv import load_dotenv
 
@@ -258,7 +260,27 @@ async def on_message(message: discord.Message):
             logger.error(f"Error processing message: {e}")
             await message.reply("ขออภัย เกิดข้อผิดพลาดในการประมวลผลข้อความของคุณ")
 
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK")
+        
+    def log_message(self, format, *args):
+        # Suppress logging every GET request to prevent console spam
+        return
+
+def run_health_server():
+    port = int(os.getenv("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    logger.info(f"Starting background health check server on port {port}")
+    server.serve_forever()
+
 if __name__ == "__main__":
+    # Start background health server for Render port binding (prevents deployment timeout)
+    threading.Thread(target=run_health_server, daemon=True).start()
+
     token = os.getenv("DISCORD_TOKEN")
     if not token:
         logger.critical("DISCORD_TOKEN is missing from environment variables!")
